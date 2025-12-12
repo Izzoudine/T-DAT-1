@@ -38,7 +38,7 @@ services:
       retries: 10
 
   spark-master:
-    image: bitnami/spark:3.5.3
+    image: bitnami/spark:3.5.2
     container_name: spark-master
     environment:
       - SPARK_MODE=master
@@ -52,7 +52,7 @@ services:
       - ./spark-jobs:/opt/bitnami/spark/jobs
 
   spark-worker:
-    image: bitnami/spark:3.5.3
+    image: bitnami/spark:3.5.2
     container_name: spark-worker
     environment:
       - SPARK_MODE=worker

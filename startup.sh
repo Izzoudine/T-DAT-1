@@ -6,8 +6,10 @@ sudo pkill -f python3
 # ----------------------------
 # 1) Lancer Docker (Kafka + Zookeeper)
 # ----------------------------
+
 echo "🐳 Starting Docker containers..."
 docker compose up -d
+
 
 # ----------------------------
 # 2) CONFIGURATION MAGIC HOST (Nouveau !)
