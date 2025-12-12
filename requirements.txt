@@ -1,0 +1,9 @@
+bs4
+vaderSentiment
+schedule
+websocket-client
+lxml
+websockets
+aiokafka
+kafka-python
+pyspark
