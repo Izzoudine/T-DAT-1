@@ -1,96 +1,98 @@
 import json
 import psycopg2
-import psycopg2.extras # Indispensable pour l'insertion rapide
+import psycopg2.extras
 import time
 import os
 from datetime import datetime
 from kafka import KafkaConsumer
 from dotenv import load_dotenv
 
-# --- CHARGEMENT DES SECRETS (.env) ---
-# Cela empêche l'erreur GitGuardian
 load_dotenv()
 
-# --- CONFIGURATION BDD ---
+# --- CONFIG ---
 DB_HOST = os.getenv('DB_HOST')
 DB_PORT = os.getenv('DB_PORT')
 DB_NAME = os.getenv('DB_NAME')
 DB_USER = os.getenv('DB_USER')
 DB_PASSWORD = os.getenv('DB_PASSWORD')
-
-# --- CONFIGURATION KAFKA ---
 KAFKA_BROKER = os.getenv('KAFKA_BROKER')
-TOPICS = ['processed-article', 'price-topic']
-GROUP_ID = 'db-ingest-optimized' 
 
-# --- CONFIGURATION BUFFER ---
-FLUSH_INTERVAL = 60 # Envoyer à la BDD toutes les 60 secondes
+# ON AJOUTE LE NOUVEAU TOPIC ICI
+TOPICS = ['processed-article', 'price-topic', 'narrative-events']
+GROUP_ID = 'db-ingest-final' 
+
+# --- BUFFER PRIX ---
+FLUSH_INTERVAL = 60 
 last_flush_time = time.time()
-price_buffer = {} # Dictionnaire pour stocker les derniers prix
+price_stats = {} 
 
-# --- CONNEXION BDD ---
+# --- CONNEXION DB ---
 try:
-    conn = psycopg2.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD
-    )
+    conn = psycopg2.connect(host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD)
     conn.autocommit = True
     cursor = conn.cursor()
     print("✅ Connecté à TimescaleDB")
 except Exception as e:
-    print(f"❌ Erreur connexion BDD: {e}")
+    print(f"❌ Erreur BDD: {e}")
     exit()
 
-# --- FONCTIONS ---
+# --- FONCTIONS D'INSERTION ---
+
+def insert_narrative_event(data):
+    """Sauvegarde le résumé généré par Gemini"""
+    try:
+        query = """
+            INSERT INTO narrative_events (event_id, datetime, main_crypto, narrative_category, headline, sentiment_score, impact_level, source_count)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (event_id) DO NOTHING;
+        """
+        # Conversion du timestamp UNIX en objet datetime
+        ts = data.get('timestamp')
+        dt = datetime.fromtimestamp(ts)
+
+        cursor.execute(query, (
+            data.get('event_id'),
+            dt,
+            data.get('main_crypto'),
+            data.get('narrative_category'), # Attention au nom de clé dans ton producer
+            data.get('headline'),
+            data.get('sentiment_score'), # Attention, parfois c'est 'sentiment' ou 'sentiment_score' selon ton script IA
+            data.get('impact_level'),    # ou 'impact'
+            data.get('source_count')
+        ))
+        print(f"🧠 AI Event Saved: {data.get('headline')}")
+    except Exception as e:
+        print(f"⚠️ Erreur Event: {e}")
 
 def flush_price_buffer():
-    """Vide le buffer et envoie tout à la BDD en une seule fois"""
-    global price_buffer, last_flush_time
-    
-    if not price_buffer:
-        return # Rien à envoyer
+    # ... (Même code que précédemment pour la moyenne des prix) ...
+    global price_stats, last_flush_time
+    if not price_stats: return
 
-    print(f"⏱️ Flush BDD: Envoi de {len(price_buffer)} paires cryptos...")
-    
-    # On prépare la liste des tuples pour SQL
+    # ... Logique de calcul moyenne ...
     values_list = []
-    for pair, data in price_buffer.items():
-        ts = data.get('timestamp')
-        # Gestion sécurité : si timestamp est float ou int, on convertit, sinon on laisse
+    for pair, stats in price_stats.items():
+        avg_price = stats['sum_price'] / stats['count']
+        last_data = stats['last_data']
+        ts = last_data.get('timestamp')
         dt_object = datetime.fromtimestamp(ts) if isinstance(ts, (int, float)) else ts
         
-        values_list.append((
-            dt_object,
-            pair,
-            data.get('last'),
-            data.get('bid'),
-            data.get('ask'),
-            data.get('volume_24h')
-        ))
+        values_list.append((dt_object, pair, avg_price, last_data.get('bid'), last_data.get('ask'), last_data.get('volume_24h')))
 
-    # Requete SQL optimisée (Batch Insert)
     query = """
         INSERT INTO crypto_prices (datetime, pair, price, bid, ask, volume)
-        VALUES %s
-        ON CONFLICT (datetime, pair) DO NOTHING;
+        VALUES %s ON CONFLICT (datetime, pair) DO NOTHING;
     """
-    
     try:
         psycopg2.extras.execute_values(cursor, query, values_list)
-        print("✅ Batch Price inséré avec succès.")
-        
-        # Reset du buffer et du timer
-        price_buffer = {} 
+        print("✅ Moyennes Prix insérées.")
+        price_stats = {}
         last_flush_time = time.time()
-        
     except Exception as e:
-        print(f"⚠️ Erreur Batch Insert: {e}")
+        print(f"⚠️ Erreur Batch: {e}")
 
 def insert_article(data):
-    """Les articles sont rares, on les insère immédiatement"""
+    # ... (Même code que précédemment pour les articles bruts) ...
     try:
         sentiment = data.get('sentiment', {})
         query = """
@@ -103,32 +105,26 @@ def insert_article(data):
             data.get('website'), data.get('time'), data.get('cryptos', []),
             data.get('narrative'), sentiment.get('score', 0.0), sentiment.get('label', 'neutral')
         ))
-        if cursor.rowcount > 0:
-            print(f"📥 Article saved: {data.get('title')[:30]}...")
-    except Exception as e:
-        print(f"⚠️ Erreur Article: {e}")
+    except Exception as e: print(f"⚠️ Erreur Article: {e}")
 
-# --- MAIN LOOP ---
+# --- MAIN ---
 def main():
     global last_flush_time
-    
-    print(f"🎧 Consumer démarré sur {KAFKA_BROKER}. Buffer: {FLUSH_INTERVAL}s.")
+    print(f"🎧 DB Ingest écoute : {TOPICS}")
     
     consumer = KafkaConsumer(
         *TOPICS,
         bootstrap_servers=KAFKA_BROKER,
-        auto_offset_reset='latest', # On veut le temps réel
+        auto_offset_reset='latest',
         enable_auto_commit=True,
         group_id=GROUP_ID,
         value_deserializer=lambda x: json.loads(x.decode('utf-8'))
     )
 
     while True:
-        # 1. Vérification du Timer (Est-ce qu'on doit envoyer à la DB ?)
         if time.time() - last_flush_time >= FLUSH_INTERVAL:
             flush_price_buffer()
 
-        # 2. Lecture des messages Kafka (Timeout court pour ne pas bloquer)
         msg_pack = consumer.poll(timeout_ms=1000) 
 
         for partition, messages in msg_pack.items():
@@ -136,19 +132,26 @@ def main():
                 topic = message.topic
                 data = message.value
 
-                # CAS A : PRIX (Mise en mémoire tampon)
+                # 1. C'est un PRIX (Moyenne)
                 if topic == 'price-topic':
                     pair = data.get('pair')
-                    # On garde uniquement la dernière valeur reçue pour cette paire
-                    price_buffer[pair] = data 
+                    price = float(data.get('last', 0))
+                    if pair not in price_stats:
+                        price_stats[pair] = {"sum_price": 0.0, "count": 0, "last_data": data}
+                    price_stats[pair]["sum_price"] += price
+                    price_stats[pair]["count"] += 1
+                    price_stats[pair]["last_data"] = data
                 
-                # CAS B : ARTICLES (Insertion immédiate)
+                # 2. C'est un ARTICLE BRUT
                 elif topic == 'processed-article':
                     insert_article(data)
+                
+                # 3. C'est un RÉSUMÉ IA (NOUVEAU)
+                elif topic == 'narrative-events':
+                    insert_narrative_event(data)
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n🛑 Arrêt du script.")
         conn.close()

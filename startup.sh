@@ -53,6 +53,8 @@ docker exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic t
 docker exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic alert-topic --partitions 1 --replication-factor 1 --if-not-exists
 docker exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic article-topic --partitions 1 --replication-factor 1 --if-not-exists
 docker exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic processed-article --partitions 1 --replication-factor 1 --if-not-exists
+docker exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic narrative-events --partitions 1 --replication-factor 1 --if-not-exists
+
 
 docker exec kafka kafka-topics --bootstrap-server kafka:29092 --list
 
@@ -85,6 +87,9 @@ nohup python3 db_kafka_ingest.py > db.log 2>&1 &
 
 echo "🌐 Starting ws.py..."
 nohup python3 -u ws.py > ws.log 2>&1 &
+
+echo "🧠 Starting narrative_engine_db.py..."
+nohup python3 narrative_engine_db.py > narrative.log 2>&1 &
 
 sleep 2
 echo "✅ System started successfully!"
