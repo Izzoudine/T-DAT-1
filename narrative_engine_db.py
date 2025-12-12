@@ -33,7 +33,7 @@ def switch_api_key():
 
 # Initialisation
 switch_api_key()
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 # --- 2. CONFIG DB & KAFKA ---
 DB_HOST = os.getenv('DB_HOST')
