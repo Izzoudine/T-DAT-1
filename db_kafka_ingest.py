@@ -2,25 +2,31 @@ import json
 import psycopg2
 import psycopg2.extras # Indispensable pour l'insertion rapide
 import time
+import os
 from datetime import datetime
 from kafka import KafkaConsumer
+from dotenv import load_dotenv
+
+# --- CHARGEMENT DES SECRETS (.env) ---
+# Cela empêche l'erreur GitGuardian
+load_dotenv()
 
 # --- CONFIGURATION BDD ---
-DB_HOST = 'c9obawmetw.l28b4d0kwr.tsdb.cloud.timescale.com'
-DB_PORT = 34828
-DB_NAME = 'tsdb'
-DB_USER = 'tsdbadmin'
-DB_PASSWORD = 'n6ev6kdbxycgn40b'
+DB_HOST = os.getenv('DB_HOST')
+DB_PORT = os.getenv('DB_PORT')
+DB_NAME = os.getenv('DB_NAME')
+DB_USER = os.getenv('DB_USER')
+DB_PASSWORD = os.getenv('DB_PASSWORD')
 
 # --- CONFIGURATION KAFKA ---
-KAFKA_BROKER = '20.199.136.163:9092' # Ou localhost si sur la VM
+KAFKA_BROKER = os.getenv('KAFKA_BROKER')
 TOPICS = ['processed-article', 'price-topic']
-GROUP_ID = 'db-ingest-optimized' # Nouveau groupe pour repartir propre
+GROUP_ID = 'db-ingest-optimized' 
 
 # --- CONFIGURATION BUFFER ---
 FLUSH_INTERVAL = 60 # Envoyer à la BDD toutes les 60 secondes
 last_flush_time = time.time()
-price_buffer = {} # Dictionnaire pour stocker les derniers prix { "BTC/USDT": {data...} }
+price_buffer = {} # Dictionnaire pour stocker les derniers prix
 
 # --- CONNEXION BDD ---
 try:
@@ -38,7 +44,7 @@ except Exception as e:
     print(f"❌ Erreur connexion BDD: {e}")
     exit()
 
-
+# --- FONCTIONS ---
 
 def flush_price_buffer():
     """Vide le buffer et envoie tout à la BDD en une seule fois"""
@@ -53,6 +59,7 @@ def flush_price_buffer():
     values_list = []
     for pair, data in price_buffer.items():
         ts = data.get('timestamp')
+        # Gestion sécurité : si timestamp est float ou int, on convertit, sinon on laisse
         dt_object = datetime.fromtimestamp(ts) if isinstance(ts, (int, float)) else ts
         
         values_list.append((
@@ -105,7 +112,7 @@ def insert_article(data):
 def main():
     global last_flush_time
     
-    print(f"🎧 Consumer démarré. Buffer réglé sur {FLUSH_INTERVAL} secondes.")
+    print(f"🎧 Consumer démarré sur {KAFKA_BROKER}. Buffer: {FLUSH_INTERVAL}s.")
     
     consumer = KafkaConsumer(
         *TOPICS,
@@ -116,8 +123,6 @@ def main():
         value_deserializer=lambda x: json.loads(x.decode('utf-8'))
     )
 
-    # On utilise consumer.poll() au lieu d'une boucle for simple
-    # pour garder le contrôle sur le temps et pouvoir flush même si pas de message
     while True:
         # 1. Vérification du Timer (Est-ce qu'on doit envoyer à la DB ?)
         if time.time() - last_flush_time >= FLUSH_INTERVAL:
@@ -134,8 +139,7 @@ def main():
                 # CAS A : PRIX (Mise en mémoire tampon)
                 if topic == 'price-topic':
                     pair = data.get('pair')
-                    # On écrase l'ancienne valeur de la paire avec la nouvelle
-                    # Comme ça, à la fin de la minute, on a le prix le plus récent (Close price)
+                    # On garde uniquement la dernière valeur reçue pour cette paire
                     price_buffer[pair] = data 
                 
                 # CAS B : ARTICLES (Insertion immédiate)

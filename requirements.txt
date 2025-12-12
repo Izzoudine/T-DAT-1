@@ -8,3 +8,4 @@ aiokafka
 kafka-python
 pyspark
 psycopg2-binary
+python-dotenv
