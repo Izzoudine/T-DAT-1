@@ -38,48 +38,7 @@ except Exception as e:
     print(f"❌ Erreur connexion BDD: {e}")
     exit()
 
-# --- 1. INITIALISATION DES TABLES ---
-def init_db():
-    try:
-        # Table Articles
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS articles (
-                id TEXT PRIMARY KEY,
-                datetime TIMESTAMPTZ NOT NULL,
-                title TEXT,
-                description TEXT,
-                link TEXT,
-                website TEXT,
-                cryptos TEXT[], 
-                narrative TEXT,
-                sentiment_score FLOAT,
-                sentiment_label TEXT
-            );
-        """)
-        
-        # Table Prices
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS crypto_prices (
-                datetime TIMESTAMPTZ NOT NULL,
-                pair TEXT NOT NULL,
-                price FLOAT,
-                bid FLOAT,
-                ask FLOAT,
-                volume FLOAT,
-                UNIQUE(datetime, pair)
-            );
-        """)
-        
-        try:
-            cursor.execute("SELECT create_hypertable('crypto_prices', 'datetime', if_not_exists => TRUE);")
-        except Exception:
-            pass
 
-        print("✅ Tables initialisées.")
-    except Exception as e:
-        print(f"⚠️ Erreur Init DB: {e}")
-
-# --- 2. FONCTIONS D'INSERTION INTELLIGENTE ---
 
 def flush_price_buffer():
     """Vide le buffer et envoie tout à la BDD en une seule fois"""
@@ -144,7 +103,6 @@ def insert_article(data):
 
 # --- MAIN LOOP ---
 def main():
-    init_db()
     global last_flush_time
     
     print(f"🎧 Consumer démarré. Buffer réglé sur {FLUSH_INTERVAL} secondes.")
