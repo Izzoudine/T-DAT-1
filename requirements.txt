@@ -7,3 +7,4 @@ websockets
 aiokafka
 kafka-python
 pyspark
+psycopg2-binary

@@ -88,6 +88,10 @@ nohup python3 price-topic.py > price.log 2>&1 &
 echo "📰 Starting article-topic.py..."
 nohup python3 article-topic.py > article.log 2>&1 &
 
+echo "📰 Starting db_kafka_ingest.py..."
+nohup python3 db_kafka_ingest.py > db.log 2>&1 &
+
+
 echo "🌐 Starting ws.py..."
 nohup python3 -u ws.py > ws.log 2>&1 &
 
