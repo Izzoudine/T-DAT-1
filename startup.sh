@@ -1,118 +1,90 @@
 #!/bin/bash
 # chmod +x startup.sh
 # ./startup.sh
-echo "🚀 Starting Kafka + Python data pipeline..."
+echo "🚀 Starting Kafka + Spark (Apache) + Python data pipeline..."
 sudo pkill -f python3
-# ----------------------------
-# 1) Lancer Docker (Kafka + Zookeeper)
-# ----------------------------
 
+# ----------------------------
+# 1) Lancer Docker
+# ----------------------------
 echo "🐳 Starting Docker containers..."
 docker compose up -d
 
+echo "⏳ Waiting 15s for services to stabilize..."
+sleep 15
 
 # ----------------------------
-# 2) CONFIGURATION MAGIC HOST (Nouveau !)
+# 2) Config HOST
 # ----------------------------
-# On map 'kafka' vers '127.0.0.1' pour que le script Python sur la VM
-# puisse parler au container via le nom qu'il annonce.
 echo "🔧 Configuring /etc/hosts for Kafka..."
-
 if grep -q "127.0.0.1 kafka" /etc/hosts; then
     echo "✅ Host entry 'kafka' already exists."
 else
-    echo "➕ Adding '127.0.0.1 kafka' to /etc/hosts..."
-    # sudo est nécessaire ici. Le script te demandera ton mot de passe si besoin.
     echo "127.0.0.1 kafka" | sudo tee -a /etc/hosts > /dev/null
 fi
 
 # ----------------------------
-# 3) Créer environnement Python
+# 3) Python Venv
 # ----------------------------
 if [ ! -d "venv" ]; then
     echo "🐍 Creating Python virtual environment..."
     python3 -m venv venv
 fi
-
-echo "📦 Activating venv and installing dependencies..."
 source venv/bin/activate
 python3 -m pip install -r requirements.txt
 
 # ----------------------------
-# 4) Supprimer les anciens topics Kafka
+# 4) Kafka Topics
 # ----------------------------
-
-docker exec -it kafka kafka-topics   --bootstrap-server kafka:29092   --delete   --topic price-topic
-docker exec -it kafka kafka-topics   --bootstrap-server kafka:29092   --delete   --topic trade-topic
-docker exec -it kafka kafka-topics   --bootstrap-server kafka:29092   --delete   --topic alert-topic
-docker exec -it kafka kafka-topics   --bootstrap-server kafka:29092   --delete   --topic article-topic
-
-# ----------------------------
-# 5) Creer les topics Kafka
-# ----------------------------
-
 echo "📌 Creating Kafka topics..."
-docker exec -it kafka kafka-topics --bootstrap-server kafka:29092 --create \
-  --topic price-topic --partitions 1 --replication-factor 1
+# On supprime d'abord pour être propre
+docker exec kafka kafka-topics --bootstrap-server kafka:29092 --delete --topic price-topic --if-exists
+docker exec kafka kafka-topics --bootstrap-server kafka:29092 --delete --topic trade-topic --if-exists
+docker exec kafka kafka-topics --bootstrap-server kafka:29092 --delete --topic alert-topic --if-exists
+docker exec kafka kafka-topics --bootstrap-server kafka:29092 --delete --topic article-topic --if-exists
+docker exec kafka kafka-topics --bootstrap-server kafka:29092 --delete --topic processed-article --if-exists
 
-docker exec -it kafka kafka-topics --bootstrap-server kafka:29092 --create \
-  --topic trade-topic --partitions 1 --replication-factor 1
-
-docker exec -it kafka kafka-topics --bootstrap-server kafka:29092 --create \
-  --topic alert-topic --partitions 1 --replication-factor 1
-
-docker exec -it kafka kafka-topics --bootstrap-server kafka:29092 --create \
-  --topic article-topic --partitions 1 --replication-factor 1
-
-docker exec -it kafka kafka-topics --bootstrap-server kafka:29092 --create \
-  --topic processed-article --partitions 1 --replication-factor 1
+# On crée
+docker exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic price-topic --partitions 1 --replication-factor 1
+docker exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic trade-topic --partitions 1 --replication-factor 1
+docker exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic alert-topic --partitions 1 --replication-factor 1
+docker exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic article-topic --partitions 1 --replication-factor 1
+docker exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic processed-article --partitions 1 --replication-factor 1
 
 docker exec -it kafka kafka-topics --bootstrap-server kafka:29092 --list
 
 # ----------------------------
-# 6) Préparer et Lancer SPARK
+# 5) Lancer SPARK (IMAGE APACHE)
 # ----------------------------
 echo "⚡ Preparing Spark environment..."
 
-# 1. Installation sur le Master (pour que le Driver puisse charger le script)
-echo "Installing Vader on Master..."
+# Installation de Vader sur Master et Worker
+echo "Installing libs on Master..."
 docker exec spark-master pip install vaderSentiment
-
-# 2. Installation sur le Worker (pour que les tâches puissent s'exécuter)
-echo "Installing Vader on Worker..."
+echo "Installing libs on Worker..."
 docker exec spark-worker pip install vaderSentiment
 
 echo "🔥 Submitting Spark Job..."
-docker exec -d spark-master spark-submit \
-  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 \
+# NOTE BIEN LES NOUVEAUX CHEMINS (/opt/spark/...)
+docker exec -d spark-master /opt/spark/bin/spark-submit \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 \
   --master spark://spark-master:7077 \
-  /opt/bitnami/spark/jobs/spark_processor.py
+  /opt/spark/jobs/spark_processor.py
 
 # ----------------------------
-# 7) Lancer les scripts en background
+# 6) Lancer Scripts Python
 # ----------------------------
-echo "📡 Starting price-topic.py in background..."
+echo "📡 Starting price-topic.py..."
 nohup python3 price-topic.py > price.log 2>&1 &
 
-echo "📰 Starting article-topic.py in background..."
+echo "📰 Starting article-topic.py..."
 nohup python3 article-topic.py > article.log 2>&1 &
 
-# ----------------------------
-# 8) Afficher les derniers logs
-# ----------------------------
-
-sleep 2
-echo "📊 Last 10 lines of price.log:"
-tail -n 10 price.log
-
-echo "📰 Last 10 lines of article.log:"
-tail -n 10 article.log
-
-echo "Making the topics available"
+echo "🌐 Starting ws.py..."
 nohup python3 -u ws.py > ws.log 2>&1 &
 
-echo "✅ System started successfully!"
-
+sleep 2
+echo "✅ System started!"
 
 
 # read the messages

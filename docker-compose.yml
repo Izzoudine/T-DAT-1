@@ -22,8 +22,7 @@ services:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
-      # Attention: Assure-toi que 20.199.136.163 est bien ton IP publique si tu es sur un VPS.
-      # Si tu es en local sur ton PC, remplace cette IP par localhost ou 127.0.0.1
+      # Remplace l'IP ci-dessous par ton IP publique ou 127.0.0.1 si local
       KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://20.199.136.163:9092
       KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
@@ -40,36 +39,33 @@ services:
       retries: 10
 
   spark-master:
-    image: bitnami/spark:3.5.2
+    image: apache/spark:3.5.1
     container_name: spark-master
-    user: root  # <--- INDISPENSABLE pour faire pip install
+    user: root  # Indispensable pour pip install
     environment:
       - SPARK_MODE=master
       - SPARK_RPC_AUTHENTICATION_SECRET=secret
-      - SPARK_DAEMON_MEMORY=1G
-    mem_limit: 1.5g
     ports:
       - '8080:8080'
       - '7077:7077'
     volumes:
-      - ./spark-jobs:/opt/bitnami/spark/jobs
+      - ./spark-jobs:/opt/spark/jobs  # <--- Note le chemin: /opt/spark
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
 
   spark-worker:
-    image: bitnami/spark:3.5.2
+    image: apache/spark:3.5.1
     container_name: spark-worker
-    user: root  # <--- INDISPENSABLE pour faire pip install
-    environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=2G
-      - SPARK_WORKER_CORES=2
-      - SPARK_RPC_AUTHENTICATION_SECRET=secret
-      - SPARK_DAEMON_MEMORY=512m
-    mem_limit: 3g
+    user: root  # Indispensable pour pip install
     depends_on:
       - spark-master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_RPC_AUTHENTICATION_SECRET=secret
     volumes:
-      - ./spark-jobs:/opt/bitnami/spark/jobs
+      - ./spark-jobs:/opt/spark/jobs  # <--- Note le chemin: /opt/spark
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
 
 volumes:
   kafka-data:
