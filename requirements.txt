@@ -1,8 +1,9 @@
+requests
 bs4
+lxml
 vaderSentiment
 schedule
 websocket-client
-lxml
 websockets
 aiokafka
 kafka-python
