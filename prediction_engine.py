@@ -1,97 +1,138 @@
 import json
 import time
 import os
-import pandas as pd
-import pandas_ta as ta
+import numpy as np
 import psycopg2
+from collections import deque
 from kafka import KafkaConsumer, KafkaProducer
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- CONFIG ---
+# --- CONFIGURATION ---
+KAFKA_BROKER = os.getenv('KAFKA_BROKER')
 DB_HOST = os.getenv('DB_HOST')
 DB_PORT = os.getenv('DB_PORT')
 DB_NAME = os.getenv('DB_NAME')
 DB_USER = os.getenv('DB_USER')
 DB_PASSWORD = os.getenv('DB_PASSWORD')
-KAFKA_BROKER = os.getenv('KAFKA_BROKER')
 
-INPUT_TOPICS = ['narrative-events', 'analytics-updates']
+INPUT_TOPIC = 'price-topic'
 OUTPUT_TOPIC = 'prediction-signals'
 
-# --- TES 8 PAIRES KRAKEN ---
-TARGET_PAIRS = [
-    "XBT/USD", "ETH/USD", "USDT/USD", "SOL/USD",
-    "ADA/USD", "MATIC/USD", "DOT/USD", "LINK/USD"
-]
+# Fenêtre d'analyse (Combien de temps on regarde en arrière pour l'IA et les Whales)
+LOOKBACK_WINDOW = "1 hour" 
 
-# --- MAPPING INTELLIGENT (News -> Kraken) ---
-# L'IA peut dire "BTC", "Bitcoin", "Polygon"... on traduit tout en paires Kraken.
+# Mapping Kraken -> Symboles IA
 SYMBOL_MAP = {
-    "BTC": "XBT/USD", "BITCOIN": "XBT/USD", "XBT": "XBT/USD",
-    "ETH": "ETH/USD", "ETHEREUM": "ETH/USD",
-    "SOL": "SOL/USD", "SOLANA": "SOL/USD",
-    "ADA": "ADA/USD", "CARDANO": "ADA/USD",
-    "MATIC": "MATIC/USD", "POLYGON": "MATIC/USD",
-    "DOT": "DOT/USD", "POLKADOT": "DOT/USD",
-    "LINK": "LINK/USD", "CHAINLINK": "LINK/USD",
-    "USDT": "USDT/USD", "TETHER": "USDT/USD"
+    "XBT/USD": "BTC",
+    "ETH/USD": "ETH",
+    "SOL/USD": "SOL",
+    "ADA/USD": "ADA",
+    "DOT/USD": "DOT",
+    "MATIC/USD": "MATIC",
+    "LINK/USD": "LINK",
+    "USDT/USD": "USDT",
+    "XRP/USD": "XRP",
+    "DOGE/USD": "DOGE",
+    "PEPE/USD": "PEPE"
 }
 
-# --- STATE (Scores en Mémoire) ---
-# On initialise tout à 0 (Neutre) pour tes 8 paires
-latest_sentiment = {pair: 50 for pair in TARGET_PAIRS} # 50 = Neutre
-whale_pressure = {pair: 0 for pair in TARGET_PAIRS}    # 0 = Pas de pression
+# --- STATE (Mémoire pour RSI) ---
+# On garde les 20 derniers prix pour calculer le RSI
+price_history = {} 
 
 # --- CONNEXION DB ---
 def get_db_connection():
-    return psycopg2.connect(host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD)
+    return psycopg2.connect(
+        host=DB_HOST, port=DB_PORT, dbname=DB_NAME, 
+        user=DB_USER, password=DB_PASSWORD
+    )
 
-# --- ANALYSE TECHNIQUE (RSI) ---
-def get_technical_score(pair):
-    """Calcule le RSI depuis la DB"""
-    # Cas spécial USDT (Stablecoin) : Pas de RSI pertinent, on renvoie Neutre
-    if pair == "USDT/USD":
-        return 50
+# --- CALCULATEURS ---
 
-    try:
-        conn = get_db_connection()
-        # On prend les 60 dernières bougies (1 heure)
-        query = f"""
-            SELECT price FROM crypto_prices 
-            WHERE pair = '{pair}' 
-            ORDER BY datetime DESC LIMIT 60
-        """
-        df = pd.read_sql(query, conn)
-        conn.close()
-        
-        if len(df) < 14: return 50
-        
-        df = df.iloc[::-1] # On remet dans l'ordre chronologique
-        
-        # Calcul RSI 14
-        rsi = ta.rsi(df['price'], length=14).iloc[-1]
-        
-        # Logique RSI inverse :
-        # RSI < 30 (Survendu) -> Score BULLISH (80-100)
-        # RSI > 70 (Suracheté) -> Score BEARISH (0-20)
-        if rsi < 30: return 90
-        if rsi < 40: return 70
-        if rsi > 70: return 10
-        if rsi > 60: return 30
-        return 50
-        
-    except Exception as e:
-        # Si erreur (ex: pas assez de données), on reste neutre
-        return 50
+def calculate_rsi(prices, period=14):
+    """Calcule le RSI sur une liste de prix"""
+    if len(prices) < period + 1:
+        return 50.0 # Pas assez de données = Neutre
+    
+    deltas = np.diff(prices)
+    seed = deltas[:period+1]
+    up = seed[seed >= 0].sum()/period
+    down = -seed[seed < 0].sum()/period
+    rs = up/down
+    rsi = np.zeros_like(deltas)
+    rsi[:period] = 100. - 100./(1. + rs)
 
-# --- MAIN ---
+    for i in range(period, len(prices)):
+        delta = deltas[i - 1] 
+        if delta > 0:
+            upval = delta
+            downval = 0.
+        else:
+            upval = 0.
+            downval = -delta
+
+        up = (up * (period - 1) + upval) / period
+        down = (down * (period - 1) + downval) / period
+        rs = up/down
+        rsi[i] = 100. - 100./(1. + rs)
+        
+    return rsi[-1]
+
+def get_ai_sentiment(cursor, pair):
+    """Récupère le sentiment moyen de la dernière HEURE"""
+    symbol = SYMBOL_MAP.get(pair, pair.split('/')[0]) # Fallback si pas dans la map
+    
+    query = f"""
+        SELECT AVG(sentiment_score) 
+        FROM narrative_events 
+        WHERE main_crypto = %s 
+        AND datetime > NOW() - INTERVAL '{LOOKBACK_WINDOW}'
+    """
+    cursor.execute(query, (symbol,))
+    result = cursor.fetchone()
+    
+    if result and result[0] is not None:
+        raw_score = float(result[0]) # Entre -1 et 1
+        # Normalisation : -1 -> 0, 0 -> 50, 1 -> 100
+        return (raw_score + 1) * 50
+    return 50.0 # Neutre par défaut
+
+def get_whale_flow(cursor, pair):
+    """Récupère le flux net des Whales sur la dernière HEURE"""
+    query = f"""
+        SELECT side, amount_usd 
+        FROM whale_alerts 
+        WHERE pair = %s 
+        AND datetime > NOW() - INTERVAL '{LOOKBACK_WINDOW}'
+    """
+    cursor.execute(query, (pair,))
+    rows = cursor.fetchall()
+    
+    if not rows:
+        return 50.0
+        
+    buy_vol = sum(row[1] for row in rows if row[0] == 'BUY')
+    sell_vol = sum(row[1] for row in rows if row[0] == 'SELL')
+    
+    net_flow = buy_vol - sell_vol
+    total_vol = buy_vol + sell_vol
+    
+    if total_vol == 0:
+        return 50.0
+        
+    # Ratio : Si tout est achat = 100, Si tout est vente = 0
+    ratio = (net_flow / total_vol) # Entre -1 et 1
+    return (ratio + 1) * 50
+
+# --- MAIN ENGINE ---
+
 def main():
-    print(f"🔮 Prediction Engine sur 8 Paires: {TARGET_PAIRS}")
+    print("🔮 Prediction Engine Démarré (Window: 1h)...")
     
     consumer = KafkaConsumer(
-        *INPUT_TOPICS,
+        INPUT_TOPIC,
         bootstrap_servers=KAFKA_BROKER,
         value_deserializer=lambda x: json.loads(x.decode('utf-8'))
     )
@@ -100,101 +141,80 @@ def main():
         bootstrap_servers=KAFKA_BROKER,
         value_serializer=lambda v: json.dumps(v).encode('utf-8')
     )
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Pour ne pas spammer la DB, on recalcule seulement toutes les X secondes par paire
+    last_calc_time = {}
 
-    last_prediction_time = time.time()
-
-    for message in consumer:
-        topic = message.topic
-        data = message.value
-        
-        # -----------------------------
-        # 1. MISE À JOUR DES DONNÉES
-        # -----------------------------
-
-        # A. Si c'est une News (Narrative)
-        if topic == 'narrative-events':
-            raw_symbol = data.get('main_crypto', '').upper()
-            
-            # On utilise le MAP pour trouver la paire Kraken correspondante
-            pair = SYMBOL_MAP.get(raw_symbol)
-            
-            if pair and pair in TARGET_PAIRS:
-                # Score IA: de -1 à 1. On transforme en 0 à 100.
-                raw_score = data.get('sentiment_score', 0)
-                sentiment_val = (raw_score + 1) * 50
-                
-                latest_sentiment[pair] = sentiment_val
-                print(f"📰 News pour {pair} ({raw_symbol}): Score IA {sentiment_val:.0f}/100")
-
-        # B. Si c'est une Whale
-        elif topic == 'analytics-updates' and data.get('type') == 'WHALE_ALERT':
-            pair = data.get('pair')
-            
-            if pair in TARGET_PAIRS:
-                side = data.get('side')
-                # +20 si Achat, -20 si Vente
-                impact = 20 if side == 'BUY' else -20
-                
-                whale_pressure[pair] += impact
-                # On borne le score whale entre -40 et +40
-                whale_pressure[pair] = max(min(whale_pressure[pair], 40), -40)
-                print(f"🐋 Whale sur {pair}: Pression ajustée à {whale_pressure[pair]}")
-
-        # -----------------------------
-        # 2. CALCUL & PRÉDICTION (Toutes les 5 sec)
-        # -----------------------------
-        if time.time() - last_prediction_time > 5:
-            
-            # On réduit doucement la pression des whales (l'effet s'estompe)
-            for p in whale_pressure:
-                whale_pressure[p] *= 0.95 
-
-            # On boucle sur TES 8 PAIRES
-            for pair in TARGET_PAIRS:
-                
-                # A. Technique (40%)
-                tech_score = get_technical_score(pair)
-                
-                # B. Sentiment IA (30%)
-                sent_score = latest_sentiment.get(pair, 50)
-                
-                # C. Whales (30%) -> Base 50 + Pression (-40 à +40)
-                whale_score = 50 + whale_pressure.get(pair, 0)
-                
-                # FORMULE FINALE
-                final_score = (tech_score * 0.4) + (whale_score * 0.3) + (sent_score * 0.3)
-                
-                # Interprétation Signal
-                signal = "NEUTRAL"
-                if final_score >= 70: signal = "BUY"
-                if final_score >= 85: signal = "STRONG_BUY"
-                if final_score <= 30: signal = "SELL"
-                if final_score <= 15: signal = "STRONG_SELL"
-                
-                # Envoi Kafka (Uniquement si ce n'est pas USDT, car USDT ne pump pas)
-                if pair != "USDT/USD":
-                    payload = {
-                        "type": "PREDICTION_SIGNAL",
-                        "pair": pair,
-                        "score": round(final_score, 1),
-                        "signal": signal,
-                        "details": {
-                            "tech_rsi": tech_score,
-                            "ai_sentiment": round(sent_score, 1),
-                            "whale_flow": round(whale_score, 1)
-                        },
-                        "timestamp": time.time()
-                    }
-                    producer.send(OUTPUT_TOPIC, payload)
-                    
-                    # Petit log pour voir que ça vit
-                    if signal != "NEUTRAL":
-                        print(f"🔮 {pair} -> {signal} ({final_score:.1f})")
-
-            last_prediction_time = time.time()
-
-if __name__ == "__main__":
     try:
-        main()
+        for message in consumer:
+            data = message.value
+            pair = data.get('pair')
+            price = float(data.get('last', 0))
+            
+            # 1. Mise à jour Buffer Prix (Mémoire)
+            if pair not in price_history:
+                price_history[pair] = deque(maxlen=30) # On garde 30 points
+            price_history[pair].append(price)
+            
+            # Limiter la fréquence de calcul (1 calcul toutes les 5 sec max par paire)
+            now = time.time()
+            if now - last_calc_time.get(pair, 0) < 5:
+                continue
+                
+            last_calc_time[pair] = now
+
+            # 2. Calcul Technique (RSI)
+            rsi_val = calculate_rsi(list(price_history[pair]))
+            
+            # Logique RSI inversée pour le score (RSI 30 = Achat = Score Haut)
+            # Si RSI = 30 (Sura vendu) -> Score Tech = 70 (Bullish)
+            # Si RSI = 70 (Suracheté) -> Score Tech = 30 (Bearish)
+            tech_score = 100 - rsi_val 
+
+            # 3. Récupération DB (IA & Whales)
+            try:
+                ai_score = get_ai_sentiment(cursor, pair)
+                whale_score = get_whale_flow(cursor, pair)
+            except Exception as e:
+                print(f"⚠️ DB Err: {e}")
+                conn.rollback() # Important pour ne pas bloquer la transaction
+                ai_score = 50.0
+                whale_score = 50.0
+
+            # 4. Fusion (Weighted Average)
+            # Tech: 40%, AI: 30%, Whales: 30%
+            final_score = (tech_score * 0.4) + (ai_score * 0.3) + (whale_score * 0.3)
+            
+            # 5. Détermination du Signal
+            signal_label = "NEUTRAL"
+            if final_score >= 65: signal_label = "BUY"
+            elif final_score >= 80: signal_label = "STRONG BUY"
+            elif final_score <= 35: signal_label = "SELL"
+            elif final_score <= 20: signal_label = "STRONG SELL"
+
+            # 6. Envoi Kafka
+            payload = {
+                "type": "PREDICTION_SIGNAL",
+                "pair": pair,
+                "score": round(final_score, 1),
+                "signal": signal_label,
+                "details": {
+                    "tech_rsi": round(rsi_val, 1),
+                    "ai_sentiment": round(ai_score, 1),
+                    "whale_flow": round(whale_score, 1)
+                },
+                "timestamp": time.time()
+            }
+            
+            producer.send(OUTPUT_TOPIC, payload)
+            # print(f"🔮 {pair}: {signal_label} ({final_score}) | W:{whale_score:.0f} AI:{ai_score:.0f}")
+
     except KeyboardInterrupt:
         print("Arrêt Prediction Engine.")
+        conn.close()
+
+if __name__ == "__main__":
+    main()
