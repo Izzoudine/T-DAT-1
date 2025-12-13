@@ -54,6 +54,7 @@ docker exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic a
 docker exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic article-topic --partitions 1 --replication-factor 1 --if-not-exists
 docker exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic processed-article --partitions 1 --replication-factor 1 --if-not-exists
 docker exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic narrative-events --partitions 1 --replication-factor 1 --if-not-exists
+docker exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic analytics-updates --partitions 1 --replication-factor 1 --if-not-exists
 
 
 docker exec kafka kafka-topics --bootstrap-server kafka:29092 --list
