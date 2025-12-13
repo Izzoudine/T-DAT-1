@@ -88,6 +88,12 @@ nohup python3 -u db_kafka_ingest.py > db.log 2>&1 &
 echo "🧠 Starting narrative_engine_db.py..."
 nohup python3 -u narrative_engine_db.py > narrative.log 2>&1 &
 
+echo "🧠 Starting analytics_engine.py..."
+nohup python3 -u analytics_engine.py > analytics.log 2>&1 &
+
+echo "🧠 Starting ws.py..."
+nohup python3 -u ws.py > ws.log 2>&1 &
+
 sleep 2
 echo "✅ System started successfully!"
 echo "📊 Logs available: price.log, article.log, db.log, ws.log"

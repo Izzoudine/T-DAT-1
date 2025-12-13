@@ -17,8 +17,8 @@ DB_USER = os.getenv('DB_USER')
 DB_PASSWORD = os.getenv('DB_PASSWORD')
 KAFKA_BROKER = os.getenv('KAFKA_BROKER')
 
-# ON AJOUTE LE NOUVEAU TOPIC ICI
-TOPICS = ['processed-article', 'price-topic', 'narrative-events']
+# Liste des topics écoutés
+TOPICS = ['processed-article', 'price-topic', 'narrative-events', 'analytics-updates']
 GROUP_ID = 'db-ingest-final' 
 
 # --- BUFFER PRIX ---
@@ -46,7 +46,6 @@ def insert_narrative_event(data):
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (event_id) DO NOTHING;
         """
-        # Conversion du timestamp UNIX en objet datetime
         ts = data.get('timestamp')
         dt = datetime.fromtimestamp(ts)
 
@@ -54,45 +53,100 @@ def insert_narrative_event(data):
             data.get('event_id'),
             dt,
             data.get('main_crypto'),
-            data.get('narrative_category'), # Attention au nom de clé dans ton producer
+            data.get('narrative_category'),
             data.get('headline'),
-            data.get('sentiment_score'), # Attention, parfois c'est 'sentiment' ou 'sentiment_score' selon ton script IA
-            data.get('impact_level'),    # ou 'impact'
+            data.get('sentiment_score'),
+            data.get('impact_level'),
             data.get('source_count')
         ))
         print(f"🧠 AI Event Saved: {data.get('headline')}")
     except Exception as e:
         print(f"⚠️ Erreur Event: {e}")
 
-def flush_price_buffer():
-    # ... (Même code que précédemment pour la moyenne des prix) ...
-    global price_stats, last_flush_time
-    if not price_stats: return
+def insert_whale_alert(data):
+    """Sauvegarde les alertes Whales"""
+    # On ne sauvegarde QUE les alertes WHALE, pas les Heatmaps (trop fréquentes)
+    if data.get('type') != 'WHALE_ALERT':
+        return
 
-    # ... Logique de calcul moyenne ...
+    try:
+        query = """
+            INSERT INTO whale_alerts (datetime, pair, side, price, amount_usd, trigger_threshold)
+            VALUES (%s, %s, %s, %s, %s, %s);
+        """
+        # Le timestamp vient du message analytics
+        ts = data.get('timestamp')
+        dt = datetime.fromtimestamp(ts)
+        
+        cursor.execute(query, (
+            dt,
+            data.get('pair'),
+            data.get('side'),      # BUY ou SELL
+            data.get('price'),
+            data.get('amount_usd'),
+            data.get('threshold_used', 0) # On récupère le seuil utilisé
+        ))
+        print(f"🐋 Whale Saved: {data.get('side')} {data.get('pair')} ${data.get('amount_usd'):,.0f}")
+    except Exception as e:
+        print(f"⚠️ Err Whale: {e}")
+def flush_price_buffer():
+    """Agrège les prix minute par minute et inclut le pct_change"""
+    global price_stats, last_flush_time
+    
+    if not price_stats:
+        return
+
+    # Log pour le debug
+    # print(f"⏱️ Flush: Envoi de {len(price_stats)} paires...")
+
     values_list = []
     for pair, stats in price_stats.items():
+        # 1. Moyenne du prix sur la minute
         avg_price = stats['sum_price'] / stats['count']
+        
+        # 2. Récupération des dernières infos
         last_data = stats['last_data']
         ts = last_data.get('timestamp')
         dt_object = datetime.fromtimestamp(ts) if isinstance(ts, (int, float)) else ts
         
-        values_list.append((dt_object, pair, avg_price, last_data.get('bid'), last_data.get('ask'), last_data.get('volume_24h')))
+        # 3. Sécurité Anti-NULL pour Bid et Ask (on met 0.0 si absent)
+        bid = last_data.get('bid')
+        if bid is None: bid = 0.0
+        
+        ask = last_data.get('ask')
+        if ask is None: ask = 0.0
 
+        # 4. Gestion du pct_change (Nouveau)
+        pct = last_data.get('pct_change')
+        if pct is None: pct = 0.0
+        
+        values_list.append((
+            dt_object, 
+            pair, 
+            avg_price, 
+            bid, 
+            ask, 
+            last_data.get('volume_24h'), 
+            pct
+        ))
+
+    # Mise à jour de la requête SQL avec pct_change
     query = """
-        INSERT INTO crypto_prices (datetime, pair, price, bid, ask, volume)
-        VALUES %s ON CONFLICT (datetime, pair) DO NOTHING;
+        INSERT INTO crypto_prices (datetime, pair, price, bid, ask, volume, pct_change)
+        VALUES %s 
+        ON CONFLICT (datetime, pair) DO NOTHING;
     """
+    
     try:
         psycopg2.extras.execute_values(cursor, query, values_list)
-        print("✅ Moyennes Prix insérées.")
+        print("✅ Moyennes Prix (avec pct_change) insérées.")
         price_stats = {}
         last_flush_time = time.time()
     except Exception as e:
         print(f"⚠️ Erreur Batch: {e}")
 
 def insert_article(data):
-    # ... (Même code que précédemment pour les articles bruts) ...
+    """Sauvegarde les articles bruts traités par Spark"""
     try:
         sentiment = data.get('sentiment', {})
         query = """
@@ -105,7 +159,8 @@ def insert_article(data):
             data.get('website'), data.get('time'), data.get('cryptos', []),
             data.get('narrative'), sentiment.get('score', 0.0), sentiment.get('label', 'neutral')
         ))
-    except Exception as e: print(f"⚠️ Erreur Article: {e}")
+    except Exception as e: 
+        print(f"⚠️ Erreur Article: {e}")
 
 # --- MAIN ---
 def main():
@@ -122,6 +177,7 @@ def main():
     )
 
     while True:
+        # Vérification du timer pour vider le buffer prix (chaque 60s)
         if time.time() - last_flush_time >= FLUSH_INTERVAL:
             flush_price_buffer()
 
@@ -136,19 +192,25 @@ def main():
                 if topic == 'price-topic':
                     pair = data.get('pair')
                     price = float(data.get('last', 0))
+                    
                     if pair not in price_stats:
                         price_stats[pair] = {"sum_price": 0.0, "count": 0, "last_data": data}
+                    
                     price_stats[pair]["sum_price"] += price
                     price_stats[pair]["count"] += 1
+                    # On garde le dernier packet car il contient le Bid/Ask/Pct le plus récent
                     price_stats[pair]["last_data"] = data
                 
                 # 2. C'est un ARTICLE BRUT
                 elif topic == 'processed-article':
                     insert_article(data)
                 
-                # 3. C'est un RÉSUMÉ IA (NOUVEAU)
+                # 3. C'est un RÉSUMÉ IA
                 elif topic == 'narrative-events':
                     insert_narrative_event(data)
+
+                elif topic == 'analytics-updates':
+                    insert_whale_alert(data)    
 
 if __name__ == "__main__":
     try:
