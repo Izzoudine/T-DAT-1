@@ -11,3 +11,5 @@ pyspark
 psycopg2-binary
 python-dotenv
 google-generativeai
+pandas_ta
+pandas
